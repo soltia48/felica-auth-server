@@ -8,7 +8,7 @@ and consumes the card's response on the following request. Keys never leave the
 server.
 
 The FeliCa cryptography (challenge math, MACs, secure framing) is reused verbatim
-from the [`felica-rs`](../felica-rs) library. A per-session worker thread drives
+from the [`felica-rs`](https://github.com/soltia48/felica-rs) library. A per-session worker thread drives
 `felica_rs::felica_standard::FelicaStandard` through a custom relay
 `FelicaDriver` whose `transceive` bounces each frame to the HTTP client and blocks
 for the reply.
@@ -59,7 +59,7 @@ Options (all also settable via environment variables):
 One JSON object per line, matching `felica-rs`'s `keys.jsonl` shape:
 
 ```json
-{"system_code":"0003","node":"FFFF","algo":"DES","version":"0003","idm":null,"key":"00112233445566ff"}
+{"system_code":"0003","node":"FFFF","algo":"DES","version":"0003","idm":null,"key":"00112233445566FF"}
 ```
 
 - `system_code` / `node` — hex integers. Node `FFFF` is the **system key**.
@@ -180,25 +180,6 @@ DOCKER_BUILDKIT=1 docker build --ssh default -t felica-auth-server .
 The compose file mounts `keys.jsonl` as a **Docker secret** (at
 `/run/secrets/felica_keys`, readable only by the app user) rather than a bind
 mount, since it holds key material. Place your `keys.jsonl` next to `compose.yaml`.
-
-## Security note
-
-This build performs **no request authentication** — any client that can reach the
-port can run authentications and encrypted exchanges with the configured keys. Bind
-it to a trusted network (or front it with your own authenticating proxy); do not
-expose it to the public internet.
-
-## Differences from the Python reference
-
-- **Keys** are loaded from JSONL (`keys.jsonl`) rather than CSV, with support for
-  IDm-specific keys.
-- **No built-in auth.** The reference had optional JWT bearer auth; this build has
-  none (see the security note above).
-- **Error codes** follow `felica-rs`'s taxonomy, not nfcpy's internal errnos, so the
-  numeric `code` values differ. FeliCa status-flag errors expose `SF1<<8 | SF2`.
-- **Session TTL / cap** are new safeguards (the reference kept sessions forever).
-- `command.timeout` (seconds) is computed from the card PMm and included on every
-  command response.
 
 ## Tests
 
