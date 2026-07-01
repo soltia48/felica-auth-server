@@ -15,7 +15,7 @@ name = "felica-auth-server"
 path = "src/main.rs"
 
 [dependencies]
-felica-rs = { git = "ssh://git@github.com/soltia48/felica-rs.git" }
+felica-rs = { git = "https://github.com/soltia48/felica-rs.git" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 flume = "0.11"

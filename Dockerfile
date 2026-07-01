@@ -14,6 +14,9 @@ RUN --mount=type=cache,target=/var/lib/apt/,sharing=locked \
     && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
     && mkdir -p -m 0700 /root/.ssh \
     && ssh-keyscan github.com >> /root/.ssh/known_hosts
+# Fetch the dependency's https git URL over SSH, using the git CLI (so the
+# forwarded SSH agent is used).
+RUN git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 WORKDIR /src
 COPY . .
