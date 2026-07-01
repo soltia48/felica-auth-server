@@ -1,0 +1,34 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Forward the SSH agent so the private `felica-rs` git dependency can be
+      # fetched at build time (requires BuildKit; `docker compose build`).
+      ssh:
+        - default
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      FELICA_HOST: 0.0.0.0
+      FELICA_PORT: "8000"
+      FELICA_KEYS: /run/secrets/felica_keys
+      FELICA_LOG_LEVEL: info
+      # Restrict encrypted-exchange to Read (0x14) by default; comma-separate to allow more.
+      FELICA_ALLOWED_CMD_CODES: "0x14"
+    # The keys are secret material: mount them via a Docker secret (not baked into
+    # the image or exposed as a bind mount). Mounted read-only at
+    # /run/secrets/felica_keys. (uid/gid/mode are Swarm-only and ignored here.)
+    secrets:
+      - felica_keys
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  felica_keys:
+    file: ./keys.jsonl

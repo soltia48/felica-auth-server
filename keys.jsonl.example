@@ -1,0 +1,3 @@
+{"system_code":"0003","node":"FFFF","algo":"DES","version":"0003","idm":null,"key":"00112233445566FF"}
+{"system_code":"0003","node":"0000","algo":"DES","version":"0000","idm":null,"key":"8899AABBCCDDEEFF"}
+{"system_code":"0003","node":"0048","algo":"DES","version":"0048","idm":null,"key":"0102030405060708"}

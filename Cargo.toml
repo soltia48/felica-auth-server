@@ -1,0 +1,29 @@
+[package]
+name = "felica-auth-server"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Remote FeliCa crypto oracle: holds keys and drives FeliCa Standard mutual authentication / secure messaging while a separate client owns the reader."
+authors = ["KIRISHIKI Yudai <yudai.kirishiki@protonmail.com>"]
+
+[lib]
+name = "felica_auth_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "felica-auth-server"
+path = "src/main.rs"
+
+[dependencies]
+felica-rs = { git = "ssh://git@github.com/soltia48/felica-rs.git" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+flume = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+rand = "0.10"

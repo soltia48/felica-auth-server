@@ -1,0 +1,5 @@
+# Fetch the `felica-rs` git dependency with the system git client so it uses your
+# configured GitHub credentials (SSH agent / credential helper) instead of
+# libgit2's limited auth.
+[net]
+git-fetch-with-cli = true
