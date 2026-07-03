@@ -424,7 +424,7 @@ dependencies = [
 [[package]]
 name = "felica-rs"
 version = "0.1.0"
-source = "git+https://github.com/soltia48/felica-rs.git#6ca3b2949d4b1413c2d71480a02784c47cb86eee"
+source = "git+https://github.com/soltia48/felica-rs.git#4057fa6f85f306fb51ef0670995b7973d2f7b19e"
 dependencies = [
  "aes",
  "cbc",
@@ -889,9 +889,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
