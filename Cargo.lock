@@ -423,7 +423,7 @@ dependencies = [
 [[package]]
 name = "felica-rs"
 version = "0.1.0"
-source = "git+https://github.com/soltia48/felica-rs.git#615caadeb85dd8973b85440d79f776e2a15591e9"
+source = "git+https://github.com/soltia48/felica-rs.git#56fcec931bf0e151a73077c3bae9deb28d93be23"
 dependencies = [
  "aes",
  "cbc",
