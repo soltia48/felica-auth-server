@@ -1,6 +1,5 @@
 //! `felica-auth-server` binary entry point.
 
-use std::collections::HashSet;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +11,9 @@ use felica_auth_server::http::{router, AppState};
 use felica_auth_server::keystore::KeyStore;
 use felica_auth_server::session::SessionManager;
 
-/// Remote FeliCa crypto oracle: holds the keys and drives FeliCa Standard mutual
-/// authentication / secure messaging while a separate client owns the reader.
+/// Remote FeliCa authentication server: holds the long-term keys and performs
+/// FeliCa Standard mutual authentication, handing the resulting session material
+/// to a client that owns the reader and runs the encrypted commands itself.
 #[derive(Debug, Parser)]
 #[command(name = "felica-auth-server", version, about)]
 struct Args {
@@ -33,17 +33,12 @@ struct Args {
     #[arg(long, env = "FELICA_KEYS", default_value = "keys.jsonl")]
     keys: String,
 
-    /// Restrict encrypted-exchange command codes (decimal or 0x-hex). Repeatable,
-    /// or comma-separated via the environment variable.
-    #[arg(
-        long = "allowed-cmd-code",
-        env = "FELICA_ALLOWED_CMD_CODES",
-        value_delimiter = ',',
-        value_name = "CODE"
-    )]
-    allowed_cmd_codes: Vec<String>,
+    /// Only authenticate read-only services (with or without key), so the card
+    /// rejects any Write in the resulting session.
+    #[arg(long, env = "FELICA_READ_ONLY_NODES")]
+    read_only_nodes: bool,
 
-    /// Idle seconds after which a session is reaped.
+    /// Idle seconds after which an unfinished authentication is reaped.
     #[arg(long, env = "FELICA_SESSION_TTL", default_value_t = 300)]
     session_ttl: u64,
 
@@ -52,31 +47,7 @@ struct Args {
     max_sessions: usize,
 }
 
-fn parse_cmd_code(raw: &str) -> Result<u8, String> {
-    let trimmed = raw.trim();
-    let (radix, digits) = match trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    {
-        Some(hex) => (16, hex),
-        None => (10, trimmed),
-    };
-    u8::from_str_radix(digits, radix)
-        .map_err(|_| format!("invalid --allowed-cmd-code value '{raw}'"))
-}
-
 async fn run(args: Args) -> Result<(), String> {
-    let allowed_cmd_codes: Option<HashSet<u8>> = if args.allowed_cmd_codes.is_empty() {
-        None
-    } else {
-        Some(
-            args.allowed_cmd_codes
-                .iter()
-                .map(|code| parse_cmd_code(code))
-                .collect::<Result<HashSet<_>, _>>()?,
-        )
-    };
-
     let keystore = KeyStore::from_jsonl(&args.keys).map_err(|e| e.message)?;
     tracing::info!(
         systems = keystore.system_codes().len(),
@@ -84,23 +55,17 @@ async fn run(args: Args) -> Result<(), String> {
         "loaded DES system keys",
     );
 
+    if args.read_only_nodes {
+        tracing::info!("restricted to authenticating read-only services");
+    }
+
     let manager = SessionManager::new(
         Arc::new(keystore),
-        allowed_cmd_codes.clone(),
+        args.read_only_nodes,
         Duration::from_secs(args.session_ttl),
         args.max_sessions,
     );
     Arc::clone(&manager).spawn_reaper();
-
-    if let Some(codes) = &allowed_cmd_codes {
-        let mut sorted: Vec<u8> = codes.iter().copied().collect();
-        sorted.sort_unstable();
-        let formatted: Vec<String> = sorted.iter().map(|c| format!("0x{c:02X}")).collect();
-        tracing::info!(
-            codes = formatted.join(", "),
-            "restricted encrypted-exchange command codes"
-        );
-    }
 
     let state = AppState { manager };
     let app = router(state);

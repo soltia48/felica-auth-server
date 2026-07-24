@@ -15,8 +15,10 @@ services:
       FELICA_PORT: "8000"
       FELICA_KEYS: /run/secrets/felica_keys
       FELICA_LOG_LEVEL: info
-      # Restrict encrypted-exchange to Read (0x14) by default; comma-separate to allow more.
-      FELICA_ALLOWED_CMD_CODES: "0x14"
+      # Safe default: only authenticate read-only services, so a session key handed
+      # to a client cannot be used to modify the card. Set to "false" to also allow
+      # writable nodes.
+      FELICA_READ_ONLY_NODES: "true"
     # The keys are secret material: mount them via a Docker secret (not baked into
     # the image or exposed as a bind mount). Mounted read-only at
     # /run/secrets/felica_keys. (uid/gid/mode are Swarm-only and ignored here.)

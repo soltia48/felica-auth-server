@@ -1,21 +1,26 @@
 # felica-auth-server
 
-A remote **FeliCa crypto oracle** written in Rust. The server holds the secret
-keys and drives the FeliCa Standard mutual-authentication and secure-messaging
-protocol, while a separate **client owns the physical reader**. For each protocol
-step the server returns the exact command frame the client must relay to the card,
-and consumes the card's response on the following request. Keys never leave the
-server.
+A remote **FeliCa authentication server** written in Rust. The server holds the
+long-term keys and performs **FeliCa Standard mutual authentication only**, while a
+separate **client owns the physical reader**. For each authentication step the
+server returns the exact command frame the client must relay to the card, and
+consumes the card's response on the following request.
+
+When authentication succeeds the server hands back the **ephemeral session
+material** (DES session key, transaction ID, transaction counter) and immediately
+forgets the session. The client then runs the encrypted Read/Write commands
+itself — so **card data never passes through the server**, and the long-term
+system/area/service keys never leave it.
 
 The FeliCa cryptography (challenge math, MACs, secure framing) is reused verbatim
-from the [`felica-rs`](https://github.com/soltia48/felica-rs) library. A per-session worker thread drives
-`felica_rs::felica_standard::FelicaStandard` through a custom relay
-`FelicaDriver` whose `transceive` bounces each frame to the HTTP client and blocks
-for the reply.
+from the [`felica-rs`](https://github.com/soltia48/felica-rs) library. A per-session
+worker thread drives `felica_rs::felica_standard::FelicaStandard` through a custom
+relay `FelicaDriver` whose `transceive` bounces each frame to the HTTP client and
+blocks for the reply.
 
 ```
-   client (owns reader)                    felica-auth-server (owns keys)
-   ─────────────────────                    ──────────────────────────────
+   client (owns reader + data)             felica-auth-server (owns long-term keys)
+   ───────────────────────────             ────────────────────────────────────────
    poll card → IDm/PMm
         │  POST /mutual-authentication ────────▶ derive keys, build Auth1 frame
         │  ◀──────────────── { command.frame } ─┘
@@ -23,9 +28,12 @@ for the reply.
         │  POST /mutual-authentication ────────▶ verify, build Auth2 frame
         │      { card_response } ◀── { frame } ─┘
    send frame to card
-        │  POST /mutual-authentication ────────▶ verify → issue_id / issue_parameter
-        │      { card_response } ◀ { complete } ┘
-   ... then POST /encryption-exchange to run encrypted Read/Write commands ...
+        │  POST /mutual-authentication ────────▶ verify → issue_id + session material,
+        │      { card_response } ◀ { complete } ┘   then the session is discarded
+        │
+   ── from here the server is not involved ──
+   rebuild the secure session locally from { session.key, transaction_id,
+   transaction_number } and run encrypted Read / Write straight against the card.
 ```
 
 ## Build & run
@@ -50,9 +58,9 @@ Options (all also settable via environment variables):
 | `--port` | `FELICA_PORT` | `8000` | Listen port |
 | `--keys` | `FELICA_KEYS` | `keys.jsonl` | Path to the keys JSONL file |
 | `--log-level` | `FELICA_LOG_LEVEL` | `info` | Log verbosity (`RUST_LOG` overrides) |
-| `--allowed-cmd-code` | `FELICA_ALLOWED_CMD_CODES` | *(unset = all)* | Restrict encrypted-exchange command codes (repeatable; comma-separated in env; decimal or `0x` hex) |
-| `--session-ttl` | `FELICA_SESSION_TTL` | `300` | Idle seconds before a session is reaped |
-| `--max-sessions` | `FELICA_MAX_SESSIONS` | `1024` | Max concurrent sessions |
+| `--read-only-nodes` | `FELICA_READ_ONLY_NODES` | off | Only authenticate read-only services (see below) |
+| `--session-ttl` | `FELICA_SESSION_TTL` | `300` | Idle seconds before an unfinished authentication is reaped |
+| `--max-sessions` | `FELICA_MAX_SESSIONS` | `1024` | Max concurrent in-flight authentications |
 
 ## Keys file (`keys.jsonl`)
 
@@ -76,8 +84,8 @@ See [`keys.jsonl.example`](keys.jsonl.example). **Never commit real keys.**
 ## HTTP API
 
 All request/response bodies are JSON. Byte fields (`idm`, `pmm`, `card_response`,
-`payload`, `frame`, `response`) are hex strings. Integer fields accept a JSON number
-or a decimal/`0x`-hex string.
+`frame`, `key`, `transaction_id`) are hex strings. Integer fields accept a JSON
+number or a decimal/`0x`-hex string.
 
 ### `GET /healthz`
 
@@ -110,60 +118,68 @@ Response — relay `command.frame` to the card:
 { "session_id": "…", "card_response": "…" }
 ```
 
-Step 2 returns the `auth2` command; step 3 completes:
+Step 2 returns the `auth2` command; step 3 completes and returns the session
+material:
 
 ```json
 { "phase": "mutual_authentication", "step": "complete",
-  "result": { "issue_id": "…", "issue_parameter": "…" }, "session_id": "…" }
+  "result": {
+    "issue_id": "…", "issue_parameter": "…",
+    "session": {
+      "scheme": "des",
+      "key": "<8-byte hex session key>",
+      "transaction_id": "<6-byte hex>",
+      "transaction_number": 0
+    }
+  },
+  "session_id": "…" }
 ```
 
-### `POST /encryption-exchange`
+The server discards the session at this point — a further request with that
+`session_id` returns `404`.
 
-A two-step exchange over an authenticated session.
+## Running commands from the client
 
-**Start** — supply the FeliCa command code and its secure payload:
+The `session` block is everything needed to keep talking to the card securely. With
+`felica-rs` on the client side:
 
-```json
-{ "session_id": "…", "cmd_code": 20, "payload": "018000" }
+```rust
+use felica_rs::felica_standard::{
+    AuthenticatedContext, BlockListElement, FelicaStandard, SecureSessionCredentials,
+};
+
+let (mut felica, _) = FelicaStandard::polling(reader.driver_mut(), "212F", 0x0003, 0, 0)?;
+felica.set_authenticated_context(AuthenticatedContext::new(
+    transaction_number,                       // from session.transaction_number
+    transaction_id,                           // from session.transaction_id
+    SecureSessionCredentials::Des(session_key) // from session.key
+));
+
+// Encrypted, straight against the card — the server sees none of this.
+let blocks = felica.read(&[BlockListElement::new(0, 0, 0)])?;
+felica.write(&[BlockListElement::new(0, 0, 0)], &new_block)?;
 ```
 
-(`cmd_code` 20 = `0x14` Read; payload `01 80 00` = read 1 block, service-list index 0,
-block 0.) Response — relay `command.frame` to the card:
+`felica.secure_transceive(cmd_code, payload, timeout_ms)` is available for arbitrary
+secure commands.
 
-```json
-{ "phase": "encryption_exchange",
-  "command": { "code": 20, "frame": "14….", "timeout": 0.003 }, "session_id": "…" }
-```
-
-**Complete** — feed the card response back:
-
-```json
-{ "session_id": "…", "card_response": "…" }
-```
-
-```json
-{ "phase": "encryption_exchange", "response": "0000011011…", "session_id": "…" }
-```
-
-`response` is the decrypted secure-response payload (e.g. `SF1 SF2 block_count
-block…`), returned raw including DES block padding — the secure response carries no
-length field, so the client interprets the structure.
-
-### Errors
+## Errors
 
 ```json
 { "error": { "message": "…", "code": 41220 } }
 ```
 
 `code` is present for FeliCa status-flag failures (`SF1 << 8 | SF2`). HTTP status is
-`400` for protocol/validation errors, `403` for a disallowed command code, `404` for
-an unknown session, `503` when the session cap is reached, `500` otherwise.
+`400` for protocol/validation errors, `404` for an unknown session, `503` when the
+session cap is reached, `500` otherwise.
 
 ## Session lifecycle
 
-Sessions live in memory, keyed by a random `session_id`, each backed by a worker
-thread. Idle sessions are reaped after `--session-ttl` seconds and the total is
-bounded by `--max-sessions`.
+A session exists only for the duration of one authentication: it is created on the
+first request, keyed by a random `session_id`, backed by a worker thread, and
+**destroyed as soon as the session material is returned** — no key state lingers on
+the server. Authentications abandoned midway are reaped after `--session-ttl`
+seconds, and the number in flight is bounded by `--max-sessions`.
 
 ## Docker
 
@@ -181,12 +197,69 @@ The compose file mounts `keys.jsonl` as a **Docker secret** (at
 `/run/secrets/felica_keys`, readable only by the app user) rather than a bind
 mount, since it holds key material. Place your `keys.jsonl` next to `compose.yaml`.
 
+It also sets `FELICA_READ_ONLY_NODES: "true"` as a safe default, so a compose
+deployment only authenticates read-only services (see below). Set it to `"false"`
+if the deployment needs to authenticate writable nodes.
+
+## Restricting to read-only nodes
+
+`--read-only-nodes` makes the server refuse to authenticate anything but read-only
+services, so the session key it hands out cannot be used to modify the card — the
+card itself rejects a Write on a read-only service.
+
+Accepted service attributes (both the "with key" and "without key" variants):
+
+| Attribute  | Meaning                       |
+|------------|-------------------------------|
+| `0b001010` | Random read-only with key     |
+| `0b001011` | Random read-only without key  |
+| `0b001110` | Cyclic read-only with key     |
+| `0b001111` | Cyclic read-only without key  |
+| `0b010110` | Purse read-only with key      |
+| `0b010111` | Purse read-only without key   |
+
+Anything else — read/write, purse direct/cashback/decrement — is rejected with
+`403`. The mode also validates the list the way the card does, so you get a clear
+`400` instead of an opaque failure: a service list must contain **at least one node
+that requires a key**, and key-requiring nodes must be listed **before** key-free
+ones (e.g. `["0x008A", "0x00CB"]`).
+
+A session can only access the services named in the authentication, so this bounds
+the whole session to reads. FeliCa also requires at least one area node in the
+request: it takes part in the key derivation and does not widen data access, so
+areas are accepted as usual.
+
+Which nodes can be authenticated at all is additionally bounded by the key file —
+the server can only authenticate nodes it holds a key for, and returns `400` for
+anything else.
+
+## Security model
+
+What the split buys you, and what it does not:
+
+- **Long-term keys stay on the server.** The system, area and service keys are only
+  ever used here, to derive the authentication keys. A client never sees them.
+- **Card data never reaches the server.** Read/Write are executed by the client
+  against the card, so block contents are not exposed to (or logged by) this
+  service.
+- **The client does receive the session key.** It is ephemeral — scoped to one
+  authenticated card session — but within that session it lets the client issue any
+  encrypted command the authenticated services allow. That is inherent: the client
+  cannot read or write data without it. The server cannot restrict which commands
+  are issued, only **which nodes it authenticates** — so bound a session with
+  `--read-only-nodes`, and by provisioning keys only for the nodes a caller should
+  ever reach.
+- **There is no request authentication.** Any client that can reach the port can ask
+  for an authentication with the configured keys. Bind it to a trusted network or
+  front it with your own authenticating proxy; do not expose it to the internet.
+
 ## Tests
 
 ```bash
 cargo test
 ```
 
-Includes unit tests for the key store and an end-to-end test that drives the full
-mutual authentication and an encrypted Read against `felica-rs`'s in-memory card
-emulator.
+Unit tests cover the key store; the end-to-end tests drive the full mutual
+authentication against `felica-rs`'s in-memory card emulator, then use the returned
+session material to perform an encrypted Read **client-side**, asserting the real
+block data comes back — and that the server dropped the session.

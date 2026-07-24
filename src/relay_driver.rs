@@ -11,6 +11,20 @@ use felica_rs::{DriverError, RemoteTarget};
 
 use crate::error::ProtocolError;
 
+/// Ephemeral secure-session material produced by a successful mutual
+/// authentication and handed to the client, so the client can run the encrypted
+/// Read/Write commands itself. The long-term system/area/service keys never
+/// leave the server; this material is valid only for the current card session.
+#[derive(Clone, Copy, Debug)]
+pub struct SecureSessionMaterial {
+    /// DES session (transaction) key.
+    pub key: [u8; 8],
+    /// Transaction ID established during authentication.
+    pub transaction_id: [u8; 6],
+    /// Transaction counter the client must continue from.
+    pub transaction_number: u16,
+}
+
 /// A message produced by the session worker for the HTTP handler to return.
 ///
 /// Exactly one `Out` is emitted per client request (see [`crate::session`]).
@@ -29,9 +43,9 @@ pub enum Out {
     AuthComplete {
         issue_id: [u8; 8],
         issue_parameter: [u8; 8],
+        /// Session material the client uses to run encrypted commands itself.
+        session: SecureSessionMaterial,
     },
-    /// An encrypted exchange finished; `response` is the decrypted payload.
-    ExchangeResult { response: Vec<u8> },
     /// The operation failed.
     Error(ProtocolError),
 }

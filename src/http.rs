@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use serde_json::{json, Map, Value};
 
 use crate::error::ProtocolError;
-use crate::session::{EncryptionExchangeInput, MutualAuthInput, SessionManager};
+use crate::session::{MutualAuthInput, SessionManager};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -25,7 +25,6 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/mutual-authentication", post(mutual_authentication))
-        .route("/encryption-exchange", post(encryption_exchange))
         .with_state(state)
 }
 
@@ -53,15 +52,6 @@ async fn mutual_authentication(
     Ok(Json(value))
 }
 
-async fn encryption_exchange(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<Json<Value>, ProtocolError> {
-    let input = parse_encryption_input(&body)?;
-    let value = state.manager.handle_encryption_exchange(input).await?;
-    Ok(Json(value))
-}
-
 // --- request parsing (lenient, mirroring the reference server) ---
 
 fn parse_mutual_input(body: &Bytes) -> Result<MutualAuthInput, ProtocolError> {
@@ -82,25 +72,6 @@ fn parse_mutual_input(body: &Bytes) -> Result<MutualAuthInput, ProtocolError> {
             .transpose()?,
         services: field(&obj, "services")
             .map(|v| parse_u16_list(v, "services"))
-            .transpose()?,
-        card_response: field(&obj, "card_response")
-            .map(|v| hex_to_bytes(v, "card_response", None))
-            .transpose()?,
-    })
-}
-
-fn parse_encryption_input(body: &Bytes) -> Result<EncryptionExchangeInput, ProtocolError> {
-    let obj = parse_body(body)?;
-    Ok(EncryptionExchangeInput {
-        session_id: get_str(&obj, "session_id"),
-        cmd_code: field(&obj, "cmd_code")
-            .map(|v| parse_u8(v, "cmd_code"))
-            .transpose()?,
-        payload: field(&obj, "payload")
-            .map(|v| hex_to_bytes(v, "payload", None))
-            .transpose()?,
-        timeout: field(&obj, "timeout")
-            .map(|v| parse_f64(v, "timeout"))
             .transpose()?,
         card_response: field(&obj, "card_response")
             .map(|v| hex_to_bytes(v, "card_response", None))
@@ -172,22 +143,6 @@ fn parse_u16_list(value: &Value, name: &str) -> Result<Vec<u16>, ProtocolError> 
         .iter()
         .map(|item| parse_u16_value(item, name))
         .collect()
-}
-
-fn parse_u8(value: &Value, name: &str) -> Result<u8, ProtocolError> {
-    let number = parse_u64_from_value(value, name)?;
-    if number > 0xFF {
-        return Err(ProtocolError::bad_request(format!(
-            "{name} must fit into one byte"
-        )));
-    }
-    Ok(number as u8)
-}
-
-fn parse_f64(value: &Value, name: &str) -> Result<f64, ProtocolError> {
-    value
-        .as_f64()
-        .ok_or_else(|| ProtocolError::bad_request(format!("{name} must be a number")))
 }
 
 fn hex_to_bytes(

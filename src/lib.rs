@@ -17,6 +17,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod keystore;
+pub mod policy;
 pub mod relay_driver;
 pub mod session;
 

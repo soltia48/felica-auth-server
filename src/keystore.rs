@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use felica_rs::felica_standard::generate_service_keys_des;
+use felica_rs::felica_standard::{generate_service_keys_des, ServiceCode};
 use serde::Deserialize;
 
 use crate::error::ProtocolError;
@@ -187,8 +187,10 @@ impl KeyStore {
     /// Derive the DES group/user service keys used to mutually authenticate the
     /// given `areas` and `services` under `system_code` for the card `idm`.
     ///
-    /// Mirrors the reference server: system key at node `0xFFFF`, then each area
-    /// key and service key folded in via [`generate_service_keys_des`].
+    /// System key at node `0xFFFF`, then each area key and service key folded in
+    /// via [`generate_service_keys_des`]. Services whose code marks them as
+    /// "without key" contribute no key — the card leaves them out of the key
+    /// schedule too, so including one here would break the authentication.
     pub fn derive_service_keys(
         &self,
         system_code: u16,
@@ -203,6 +205,7 @@ impl KeyStore {
             .collect::<Result<Vec<_>, _>>()?;
         let service_keys = services
             .iter()
+            .filter(|service| ServiceCode::new(**service).requires_key())
             .map(|service| self.get_key(system_code, *service, Some(idm)))
             .collect::<Result<Vec<_>, _>>()?;
         let (group, user) = generate_service_keys_des(&system_key, &area_keys, &service_keys);

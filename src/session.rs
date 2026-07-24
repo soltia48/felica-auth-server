@@ -1,14 +1,21 @@
 //! Session management: the per-session worker thread and the [`SessionManager`].
 //!
-//! Each session owns an OS worker thread that drives `felica-rs`'s high-level
-//! `FelicaStandard` API against a [`RelayDriver`]. Because a single
-//! `mutual_authentication` call spans two card round-trips — and therefore two
-//! HTTP requests — the worker blocks inside the driver's `transceive` between
-//! requests. Coordination uses three unbounded channels:
+//! The server performs **mutual authentication only**. Once authentication
+//! succeeds it hands the resulting ephemeral secure-session material (DES session
+//! key, transaction ID and transaction counter) to the client and forgets the
+//! session. The client then runs the encrypted Read/Write commands itself, so
+//! card data never passes through the server; only the long-term system, area and
+//! service keys stay here.
 //!
-//! - `control` (HTTP → worker): start a mutual-auth or an encrypted exchange.
+//! Each session owns an OS worker thread that drives `felica-rs`'s high-level
+//! `FelicaStandard::mutual_authentication` against a [`RelayDriver`]. Because that
+//! single call spans two card round-trips — and therefore two HTTP requests — the
+//! worker blocks inside the driver's `transceive` between requests. Coordination
+//! uses three unbounded channels:
+//!
+//! - `control` (HTTP → worker): start a mutual authentication.
 //! - `card` (HTTP → relay driver): a card response to feed the pending transceive.
-//! - `out` (worker/driver → HTTP): the next frame to relay, or a final result.
+//! - `out` (worker/driver → HTTP): the next frame to relay, or the final result.
 //!
 //! Every client request delivers exactly one input (a control command or a card
 //! response) and consumes exactly one `Out`, so the streams stay in lock-step.
@@ -16,37 +23,30 @@
 //! tracks whether the worker is next expecting a control command or a card
 //! response to route each request and reject out-of-order ones cleanly.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use felica_rs::felica_standard::{FelicaStandard, ServiceCode};
+use felica_rs::felica_standard::{FelicaStandard, SecureSessionCredentialsRef, ServiceCode};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::{map_felica_error, ProtocolError};
 use crate::keystore::KeyStore;
-use crate::relay_driver::{Out, RelayDriver};
+use crate::policy::{check_service_list_shape, is_read_only_service};
+use crate::relay_driver::{Out, RelayDriver, SecureSessionMaterial};
 
-/// A high-level command sent from an HTTP handler to a session worker.
-enum Control {
-    StartAuth {
-        system_code: u16,
-        areas: Vec<u16>,
-        services: Vec<u16>,
-    },
-    StartExchange {
-        cmd_code: u8,
-        payload: Vec<u8>,
-        /// Client-provided card timeout; `None` lets the worker pick a default.
-        timeout_ms: Option<u16>,
-    },
+/// A request from an HTTP handler asking the worker to authenticate.
+struct StartAuth {
+    system_code: u16,
+    areas: Vec<u16>,
+    services: Vec<u16>,
 }
 
 /// What the worker is next expecting from the client.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Expect {
-    /// A new control command (start auth / start exchange).
+    /// A new authentication request.
     Control,
     /// A card response feeding the pending transceive.
     Card,
@@ -62,7 +62,7 @@ struct SessionInner {
 struct Session {
     idm: [u8; 8],
     pmm: [u8; 8],
-    control_tx: flume::Sender<Control>,
+    control_tx: flume::Sender<StartAuth>,
     card_tx: flume::Sender<Vec<u8>>,
     out_rx: flume::Receiver<Out>,
     inner: TokioMutex<SessionInner>,
@@ -81,22 +81,13 @@ pub struct MutualAuthInput {
     pub card_response: Option<Vec<u8>>,
 }
 
-/// Parsed input for `POST /encryption-exchange`.
-#[derive(Debug, Default)]
-pub struct EncryptionExchangeInput {
-    pub session_id: Option<String>,
-    pub cmd_code: Option<u8>,
-    pub payload: Option<Vec<u8>>,
-    /// Client-provided card timeout in seconds.
-    pub timeout: Option<f64>,
-    pub card_response: Option<Vec<u8>>,
-}
-
-/// In-memory manager of live FeliCa sessions.
+/// In-memory manager of in-flight authentication sessions.
 pub struct SessionManager {
     sessions: StdMutex<HashMap<String, Arc<Session>>>,
     keystore: Arc<KeyStore>,
-    allowed_cmd_codes: Option<HashSet<u8>>,
+    /// When set, only read-only services may be authenticated (and areas not at
+    /// all), so the card will refuse any Write in the resulting session.
+    read_only_nodes: bool,
     ttl: Duration,
     max_sessions: usize,
 }
@@ -104,21 +95,21 @@ pub struct SessionManager {
 impl SessionManager {
     pub fn new(
         keystore: Arc<KeyStore>,
-        allowed_cmd_codes: Option<HashSet<u8>>,
+        read_only_nodes: bool,
         ttl: Duration,
         max_sessions: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             sessions: StdMutex::new(HashMap::new()),
             keystore,
-            allowed_cmd_codes,
+            read_only_nodes,
             ttl,
             max_sessions,
         })
     }
 
-    /// Spawn the background task that reaps idle sessions. Must be called from
-    /// within a Tokio runtime.
+    /// Spawn the background task that reaps sessions abandoned mid-authentication.
+    /// Must be called from within a Tokio runtime.
     pub fn spawn_reaper(self: Arc<Self>) {
         let ttl = self.ttl;
         let interval = (ttl / 2).max(Duration::from_secs(1));
@@ -140,7 +131,7 @@ impl SessionManager {
         });
     }
 
-    /// Number of live sessions (for diagnostics / health).
+    /// Number of authentications currently in flight (for diagnostics / health).
     pub fn live_sessions(&self) -> usize {
         self.sessions.lock().unwrap().len()
     }
@@ -152,6 +143,10 @@ impl SessionManager {
             .get(session_id)
             .cloned()
             .ok_or_else(|| ProtocolError::not_found("unknown session_id"))
+    }
+
+    fn remove_session(&self, session_id: &str) {
+        self.sessions.lock().unwrap().remove(session_id);
     }
 
     fn get_or_create_session(
@@ -199,7 +194,7 @@ impl SessionManager {
             return Err(ProtocolError::new(503, "too many active sessions"));
         }
 
-        let (control_tx, control_rx) = flume::unbounded::<Control>();
+        let (control_tx, control_rx) = flume::unbounded::<StartAuth>();
         let (card_tx, card_rx) = flume::unbounded::<Vec<u8>>();
         let (out_tx, out_rx) = flume::unbounded::<Out>();
         let keystore = Arc::clone(&self.keystore);
@@ -244,12 +239,21 @@ impl SessionManager {
             let system_code = input
                 .system_code
                 .ok_or_else(|| ProtocolError::bad_request("system_code is required"))?;
+            // FeliCa authentication needs at least one real area node.
             let areas = require_nonempty(input.areas, "areas")?;
             let services = require_nonempty(input.services, "services")?;
+            if self.read_only_nodes {
+                if let Err(err) = enforce_read_only_nodes(&services) {
+                    if created {
+                        self.remove_session(&session_id);
+                    }
+                    return Err(err);
+                }
+            }
             inner.auth_frames = 0;
             session
                 .control_tx
-                .send(Control::StartAuth {
+                .send(StartAuth {
                     system_code,
                     areas,
                     services,
@@ -291,22 +295,21 @@ impl SessionManager {
             Out::AuthComplete {
                 issue_id,
                 issue_parameter,
+                session: material,
             } => {
                 inner.expect = Expect::Control;
+                // The authentication is finished and the client now holds the
+                // session material: drop the session so no key state lingers here.
+                self.remove_session(&session_id);
                 json!({
                     "phase": "mutual_authentication",
                     "step": "complete",
                     "result": {
                         "issue_id": hex::encode(issue_id),
                         "issue_parameter": hex::encode(issue_parameter),
+                        "session": secure_session_json(&material),
                     },
                 })
-            }
-            Out::ExchangeResult { .. } => {
-                inner.expect = Expect::Control;
-                return Err(ProtocolError::internal(
-                    "unexpected exchange result during authentication",
-                ));
             }
             Out::Error(err) => {
                 inner.expect = Expect::Control;
@@ -318,92 +321,6 @@ impl SessionManager {
         if starting {
             value["session_created"] = json!(created);
         }
-        Ok(value)
-    }
-
-    /// Drive `POST /encryption-exchange`.
-    pub async fn handle_encryption_exchange(
-        &self,
-        input: EncryptionExchangeInput,
-    ) -> Result<Value, ProtocolError> {
-        let session_id = input
-            .session_id
-            .ok_or_else(|| ProtocolError::bad_request("session_id is required"))?;
-        let session = self.get_session(&session_id)?;
-        let mut inner = session.inner.lock().await;
-        let starting = inner.expect == Expect::Control;
-
-        let out = if starting {
-            let cmd_code = input
-                .cmd_code
-                .ok_or_else(|| ProtocolError::bad_request("cmd_code is required"))?;
-            if let Some(allowed) = &self.allowed_cmd_codes {
-                if !allowed.contains(&cmd_code) {
-                    return Err(ProtocolError::forbidden(format!(
-                        "cmd_code 0x{cmd_code:02X} is not permitted"
-                    )));
-                }
-            }
-            let payload = input
-                .payload
-                .ok_or_else(|| ProtocolError::bad_request("payload is required"))?;
-            let timeout_ms = input.timeout.map(secs_to_ms);
-            session
-                .control_tx
-                .send(Control::StartExchange {
-                    cmd_code,
-                    payload,
-                    timeout_ms,
-                })
-                .map_err(|_| ProtocolError::internal("session worker unavailable"))?;
-            recv_out(&session).await?
-        } else {
-            let card = input.card_response.ok_or_else(|| {
-                ProtocolError::bad_request(
-                    "card_response is required to complete the pending exchange",
-                )
-            })?;
-            session
-                .card_tx
-                .send(card)
-                .map_err(|_| ProtocolError::internal("session worker unavailable"))?;
-            recv_out(&session).await?
-        };
-
-        session.touch();
-
-        let mut value = match out {
-            Out::Frame {
-                code,
-                frame,
-                timeout_ms,
-            } => {
-                inner.expect = Expect::Card;
-                json!({
-                    "phase": "encryption_exchange",
-                    "command": command_json(code, &frame, timeout_ms),
-                })
-            }
-            Out::ExchangeResult { response } => {
-                inner.expect = Expect::Control;
-                json!({
-                    "phase": "encryption_exchange",
-                    "response": hex::encode(response),
-                })
-            }
-            Out::AuthComplete { .. } => {
-                inner.expect = Expect::Control;
-                return Err(ProtocolError::internal(
-                    "unexpected auth completion during exchange",
-                ));
-            }
-            Out::Error(err) => {
-                inner.expect = Expect::Control;
-                return Err(err);
-            }
-        };
-
-        value["session_id"] = json!(session_id);
         Ok(value)
     }
 }
@@ -420,6 +337,24 @@ async fn recv_out(session: &Session) -> Result<Out, ProtocolError> {
         .recv_async()
         .await
         .map_err(|_| ProtocolError::internal("session worker terminated"))
+}
+
+/// Reject a service list that would grant more than read access.
+///
+/// A session can only access the services named in the authentication, so
+/// constraining this list to read-only services bounds the whole session to reads:
+/// the card refuses a Write on a read-only service. (The area node FeliCa also
+/// requires takes part in the key derivation; it does not widen data access.)
+fn enforce_read_only_nodes(services: &[u16]) -> Result<(), ProtocolError> {
+    if let Some(code) = services
+        .iter()
+        .find(|service| !is_read_only_service(**service))
+    {
+        return Err(ProtocolError::forbidden(format!(
+            "service 0x{code:04X} is not a read-only node"
+        )));
+    }
+    check_service_list_shape(services).map_err(ProtocolError::bad_request)
 }
 
 fn require_nonempty(value: Option<Vec<u16>>, name: &str) -> Result<Vec<u16>, ProtocolError> {
@@ -439,30 +374,57 @@ fn command_json(code: u8, frame: &[u8], timeout_ms: u16) -> Value {
     })
 }
 
-fn ms_to_secs(ms: u16) -> f64 {
-    ms as f64 / 1000.0
+fn secure_session_json(material: &SecureSessionMaterial) -> Value {
+    json!({
+        "scheme": "des",
+        "key": hex::encode(material.key),
+        "transaction_id": hex::encode(material.transaction_id),
+        "transaction_number": material.transaction_number,
+    })
 }
 
-fn secs_to_ms(secs: f64) -> u16 {
-    (secs * 1000.0).ceil().clamp(0.0, u16::MAX as f64) as u16
+fn ms_to_secs(ms: u16) -> f64 {
+    ms as f64 / 1000.0
 }
 
 fn new_session_id() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
 
-/// The per-session worker loop: authenticate, then serve encrypted exchanges,
-/// reusing `felica-rs`'s `FelicaStandard` verbatim through the relay driver.
+/// Extract the ephemeral session material established by the authentication.
+fn secure_session_material(
+    felica: &FelicaStandard<'_, RelayDriver>,
+) -> Result<SecureSessionMaterial, ProtocolError> {
+    let context = felica.authenticated_context().ok_or_else(|| {
+        ProtocolError::internal("authenticated context missing after mutual authentication")
+    })?;
+    let key = match context.credentials() {
+        SecureSessionCredentialsRef::Des(key) => *key,
+        _ => {
+            return Err(ProtocolError::internal(
+                "unexpected secure session scheme (expected DES)",
+            ))
+        }
+    };
+    Ok(SecureSessionMaterial {
+        key,
+        transaction_id: *context.transaction_id(),
+        transaction_number: context.transaction_number(),
+    })
+}
+
+/// The per-session worker loop: run mutual authentication via `felica-rs` through
+/// the relay driver, then report the session material for the client to use.
 fn run_session(
     idm: [u8; 8],
     pmm: [u8; 8],
     keystore: Arc<KeyStore>,
-    control_rx: flume::Receiver<Control>,
+    control_rx: flume::Receiver<StartAuth>,
     card_rx: flume::Receiver<Vec<u8>>,
     out_tx: flume::Sender<Out>,
 ) {
     let mut driver = RelayDriver::new(idm.to_vec(), pmm.to_vec(), out_tx.clone(), card_rx);
-    let (mut felica, poll) = match FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+    let (mut felica, _poll) = match FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
     {
         Ok(value) => value,
         Err(err) => {
@@ -471,57 +433,43 @@ fn run_session(
         }
     };
 
-    while let Ok(control) = control_rx.recv() {
-        match control {
-            Control::StartAuth {
-                system_code,
-                areas,
-                services,
-            } => {
-                let derived =
-                    match keystore.derive_service_keys(system_code, &idm, &areas, &services) {
-                        Ok(keys) => keys,
-                        Err(err) => {
-                            let _ = out_tx.send(Out::Error(err));
-                            continue;
-                        }
-                    };
-                let service_codes: Vec<ServiceCode> = services
-                    .iter()
-                    .map(|code| ServiceCode::new(*code))
-                    .collect();
-                let out = match felica.mutual_authentication(
-                    &areas,
-                    &service_codes,
-                    &derived.group,
-                    &derived.user,
-                ) {
-                    Ok(result) => Out::AuthComplete {
-                        issue_id: result.issue_id,
-                        issue_parameter: result.issue_parameter,
-                    },
-                    Err(err) => Out::Error(map_felica_error(&err)),
-                };
-                let _ = out_tx.send(out);
+    while let Ok(request) = control_rx.recv() {
+        let derived = match keystore.derive_service_keys(
+            request.system_code,
+            &idm,
+            &request.areas,
+            &request.services,
+        ) {
+            Ok(keys) => keys,
+            Err(err) => {
+                let _ = out_tx.send(Out::Error(err));
+                continue;
             }
-            Control::StartExchange {
-                cmd_code,
-                payload,
-                timeout_ms,
-            } => {
-                if felica.authenticated_context().is_none() {
-                    let _ = out_tx.send(Out::Error(ProtocolError::bad_request(
-                        "session is not authenticated",
-                    )));
-                    continue;
-                }
-                let timeout = timeout_ms.unwrap_or_else(|| poll.read_timeout_ms(1));
-                let out = match felica.secure_transceive(cmd_code, &payload, timeout) {
-                    Ok(response) => Out::ExchangeResult { response },
-                    Err(err) => Out::Error(map_felica_error(&err)),
-                };
-                let _ = out_tx.send(out);
-            }
-        }
+        };
+        let service_codes: Vec<ServiceCode> = request
+            .services
+            .iter()
+            .map(|code| ServiceCode::new(*code))
+            .collect();
+
+        let out = match felica.mutual_authentication(
+            &request.areas,
+            &service_codes,
+            &derived.group,
+            &derived.user,
+        ) {
+            Ok(result) => match secure_session_material(&felica) {
+                Ok(session) => Out::AuthComplete {
+                    issue_id: result.issue_id,
+                    issue_parameter: result.issue_parameter,
+                    session,
+                },
+                Err(err) => Out::Error(err),
+            },
+            Err(err) => Out::Error(map_felica_error(&err)),
+        };
+        // The session key belongs to the client from here on; don't keep it.
+        felica.clear_authenticated_context();
+        let _ = out_tx.send(out);
     }
 }
