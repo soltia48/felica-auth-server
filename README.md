@@ -38,12 +38,7 @@ blocks for the reply.
 
 ## Build & run
 
-Requires a recent Rust toolchain (the `felica-rs` dependency uses edition 2024). The
-`felica-rs` crate is pulled from git
-(`github.com/soltia48/felica-rs`), so the build needs GitHub access. This project
-sets `net.git-fetch-with-cli = true` (see [`.cargo/config.toml`](.cargo/config.toml))
-so cargo uses your system git credentials; for the private repo, an SSH key plus a
-`url."ssh://git@github.com/".insteadOf "https://github.com/"` git rewrite works.
+Requires a recent Rust toolchain (the `felica-rs` dependency uses edition 2024).
 
 ```bash
 cargo build --release
@@ -183,14 +178,12 @@ seconds, and the number in flight is bounded by `--max-sessions`.
 
 ## Docker
 
-The `felica-rs` git dependency is fetched over SSH during the build, so BuildKit
-must forward your SSH agent. See [`Dockerfile`](Dockerfile) and
-[`compose.yaml`](compose.yaml):
+See [`Dockerfile`](Dockerfile) and [`compose.yaml`](compose.yaml):
 
 ```bash
-docker compose up --build          # compose forwards the agent (ssh: default)
+docker compose up --build
 # or, plain docker:
-DOCKER_BUILDKIT=1 docker build --ssh default -t felica-auth-server .
+docker build -t felica-auth-server .
 ```
 
 The compose file mounts `keys.jsonl` as a **Docker secret** (at

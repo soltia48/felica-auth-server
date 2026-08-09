@@ -3,10 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      # Forward the SSH agent so the private `felica-rs` git dependency can be
-      # fetched at build time (requires BuildKit; `docker compose build`).
-      ssh:
-        - default
     restart: unless-stopped
     ports:
       - "8000:8000"
