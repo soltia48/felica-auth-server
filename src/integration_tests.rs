@@ -1,4 +1,4 @@
-//! End-to-end tests driving the relay against `felica-rs`'s in-memory card
+//! End-to-end tests driving the relay against `felica`'s in-memory card
 //! emulator. The test plays the role of the reader-owning *client*: it forwards
 //! each authentication frame the server emits to the emulated card and feeds the
 //! card's response back on the next request. Once authentication completes it
@@ -8,12 +8,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use felica_rs::felica_standard::{
+use felica::felica_standard::{
     AuthenticatedContext, BlockListElement, EmulatedArea, EmulatedService, EmulatedSystem,
     FelicaDriver, FelicaStandard, FelicaStandardEmulator, SecureSessionCredentials, ServiceCode,
     Type3TagPollingResult,
 };
-use felica_rs::{DriverError, RemoteTarget};
+use felica::{DriverError, RemoteTarget};
 
 use crate::keystore::KeyStore;
 use crate::session::{MutualAuthInput, SessionManager};

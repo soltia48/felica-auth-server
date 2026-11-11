@@ -6,7 +6,7 @@
 //! read-only services means the card itself will refuse any Write in that
 //! session.
 
-use felica_rs::felica_standard::ServiceCode;
+use felica::felica_standard::ServiceCode;
 
 /// FeliCa service attributes that grant read-only access, in both the
 /// "with key" and "without key" variants:

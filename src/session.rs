@@ -7,7 +7,7 @@
 //! card data never passes through the server; only the long-term system, area and
 //! service keys stay here.
 //!
-//! Each session owns an OS worker thread that drives `felica-rs`'s high-level
+//! Each session owns an OS worker thread that drives `felica`'s high-level
 //! `FelicaStandard::mutual_authentication` against a [`RelayDriver`]. Because that
 //! single call spans two card round-trips — and therefore two HTTP requests — the
 //! worker blocks inside the driver's `transceive` between requests. Coordination
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use felica_rs::felica_standard::{FelicaStandard, SecureSessionCredentialsRef, ServiceCode};
+use felica::felica_standard::{FelicaStandard, SecureSessionCredentialsRef, ServiceCode};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -413,7 +413,7 @@ fn secure_session_material(
     })
 }
 
-/// The per-session worker loop: run mutual authentication via `felica-rs` through
+/// The per-session worker loop: run mutual authentication via `felica` through
 /// the relay driver, then report the session material for the client to use.
 fn run_session(
     idm: [u8; 8],

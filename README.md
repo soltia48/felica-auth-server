@@ -13,8 +13,8 @@ itself — so **card data never passes through the server**, and the long-term
 system/area/service keys never leave it.
 
 The FeliCa cryptography (challenge math, MACs, secure framing) is reused verbatim
-from the [`felica-rs`](https://github.com/soltia48/felica-rs) library. A per-session
-worker thread drives `felica_rs::felica_standard::FelicaStandard` through a custom
+from the [`felica`](https://github.com/soltia48/felica) library. A per-session
+worker thread drives `felica::felica_standard::FelicaStandard` through a custom
 relay `FelicaDriver` whose `transceive` bounces each frame to the HTTP client and
 blocks for the reply.
 
@@ -38,7 +38,7 @@ blocks for the reply.
 
 ## Build & run
 
-Requires a recent Rust toolchain (the `felica-rs` dependency uses edition 2024).
+Requires a recent Rust toolchain (the `felica` dependency uses edition 2024).
 
 ```bash
 cargo build --release
@@ -59,7 +59,7 @@ Options (all also settable via environment variables):
 
 ## Keys file (`keys.jsonl`)
 
-One JSON object per line, matching `felica-rs`'s `keys.jsonl` shape:
+One JSON object per line, matching `felica`'s `keys.jsonl` shape:
 
 ```json
 {"system_code":"0003","node":"FFFF","algo":"DES","version":"0003","idm":null,"key":"00112233445566FF"}
@@ -136,10 +136,10 @@ The server discards the session at this point — a further request with that
 ## Running commands from the client
 
 The `session` block is everything needed to keep talking to the card securely. With
-`felica-rs` on the client side:
+`felica` on the client side:
 
 ```rust
-use felica_rs::felica_standard::{
+use felica::felica_standard::{
     AuthenticatedContext, BlockListElement, FelicaStandard, SecureSessionCredentials,
 };
 
@@ -253,6 +253,6 @@ cargo test
 ```
 
 Unit tests cover the key store; the end-to-end tests drive the full mutual
-authentication against `felica-rs`'s in-memory card emulator, then use the returned
+authentication against `felica`'s in-memory card emulator, then use the returned
 session material to perform an encrypted Read **client-side**, asserting the real
 block data comes back — and that the server dropped the session.
